@@ -1,0 +1,13 @@
+{
+  "name": "@invoice-tokenization/constants",
+  "version": "1.0.0",
+  "description": "Shared constants for invoice tokenization platform",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

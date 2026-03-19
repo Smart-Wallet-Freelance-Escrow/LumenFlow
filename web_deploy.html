@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Soroban Contract Deployer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .code-block { background: #f4f4f4; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
+        .button:hover { background: #0056b3; }
+        .status { margin: 10px 0; padding: 10px; border-radius: 5px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .info { background: #d1ecf1; color: #0c5460; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Soroban Smart Contract Deployer</h1>
+        
+        <div class="status info">
+            <h3>📋 Instructions:</h3>
+            <ol>
+                <li>Copy the invoice contract code from <code>contracts/invoice_contract_ready.rs</code></li>
+                <li>Paste it in the Soroban Playground: <a href="https://soroban.stellar.org" target="_blank">https://soroban.stellar.org</a></li>
+                <li>Click "Build" to compile to WASM</li>
+                <li>Download the WASM file</li>
+                <li>Repeat for registry contract</li>
+                <li>Use the commands below to deploy</li>
+            </ol>
+        </div>
+
+        <h2>🔧 Deployment Commands</h2>
+        
+        <div class="code-block">
+            <h3>1. Deploy Invoice Contract</h3>
+            <code>
+                stellar contract deploy --wasm invoice_contract.wasm --source YOUR_SECRET_KEY --network testnet
+            </code>
+        </div>
+
+        <div class="code-block">
+            <h3>2. Deploy Registry Contract</h3>
+            <code>
+                stellar contract deploy --wasm registry_contract.wasm --source YOUR_SECRET_KEY --network testnet
+            </code>
+        </div>
+
+        <div class="code-block">
+            <h3>3. Initialize Invoice Contract</h3>
+            <code>
+                stellar contract invoke --id INVOICE_CONTRACT_ADDRESS --source YOUR_SECRET_KEY --network testnet -- initialize --usdc_address GBBD47IF6LWK7P7MJVSCUFI274NM5YCFA247JEC2HGJLMD2BDQD2XUJR --registry_address REGISTRY_CONTRACT_ADDRESS
+            </code>
+        </div>
+
+        <div class="code-block">
+            <h3>4. Initialize Registry Contract</h3>
+            <code>
+                stellar contract invoke --id REGISTRY_CONTRACT_ADDRESS --source YOUR_SECRET_KEY --network testnet -- initialize --admin YOUR_PUBLIC_KEY
+            </code>
+        </div>
+
+        <h2>📱 Contract Code Ready for Copy</h2>
+        
+        <div class="code-block">
+            <h3>Invoice Contract (copy to Soroban Playground):</h3>
+            <textarea id="invoiceCode" style="width: 100%; height: 200px;" readonly>
+#![no_std]
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec, Map, String, U256, I256};
+
+#[contract]
+pub struct InvoiceContract;
+
+#[contractimpl]
+impl InvoiceContract {
+    pub fn initialize(env: Env, usdc_address: Address, registry_address: Address) {
+        let key = Symbol::new(&env, "config");
+        if env.storage().persistent().has(&key) {
+            panic!("already initialized");
+        }
+
+        let config = (
+            usdc_address,
+            registry_address,
+            1u64, // next_invoice_id
+            50u32, // platform_fee_bps
+        );
+
+        env.storage().persistent().set(&key, &config);
+    }
+
+    pub fn mint_invoice(
+        env: Env,
+        amount: i128,
+        discount_price: i128,
+        due_date: u64,
+    ) -> u64 {
+        let config_key = Symbol::new(&env, "config");
+        let config: (Address, Address, u64, u32) = env.storage().persistent().get(&config_key).unwrap();
+        
+        if discount_price >= amount {
+            panic!("discount_price must be less than amount");
+        }
+
+        if due_date <= env.ledger().timestamp() {
+            panic!("due_date must be in the future");
+        }
+
+        let invoice_id = config.2;
+        
+        let invoice = (
+            invoice_id,
+            env.current_contract_address(),
+            amount,
+            discount_price,
+            due_date,
+            0u64, // status: Open
+            Option::<Address>::None, // investor
+            Option::<u64>::None, // funded_at
+            Option::<u64>::None, // settled_at
+        );
+
+        let key = Symbol::new(&env, &invoice_id);
+        env.storage().persistent().set(&key, &invoice);
+
+        let mut updated_config = config;
+        updated_config.2 = invoice_id + 1;
+        env.storage().persistent().set(&config_key, &updated_config);
+
+        invoice_id
+    }
+
+    pub fn fund_invoice(env: Env, invoice_id: u64) {
+        let key = Symbol::new(&env, &invoice_id);
+        let mut invoice: (u64, Address, i128, i128, u64, u64, Option<Address>, Option<u64>, Option<u64>) = 
+            env.storage().persistent().get(&key).unwrap();
+
+        if invoice.5 != 0 { // Not Open
+            panic!("invoice not open for funding");
+        }
+
+        if env.ledger().timestamp() >= invoice.4 {
+            panic!("invoice expired");
+        }
+
+        invoice.5 = 1; // Funded
+        invoice.6 = Some(env.current_contract_address());
+        invoice.7 = Some(env.ledger().timestamp());
+
+        env.storage().persistent().set(&key, &invoice);
+    }
+
+    pub fn settle_invoice(env: Env, invoice_id: u64) {
+        let key = Symbol::new(&env, &invoice_id);
+        let mut invoice: (u64, Address, i128, i128, u64, u64, Option<Address>, Option<u64>, Option<u64>) = 
+            env.storage().persistent().get(&key).unwrap();
+
+        if invoice.5 != 1 { // Not Funded
+            panic!("invoice not funded");
+        }
+
+        if env.ledger().timestamp() < invoice.4 {
+            panic!("invoice not due yet");
+        }
+
+        invoice.5 = 2; // Settled
+        invoice.8 = Some(env.ledger().timestamp());
+
+        env.storage().persistent().set(&key, &invoice);
+    }
+
+    pub fn get_invoice(env: Env, invoice_id: u64) -> (u64, Address, i128, i128, u64, u64, Option<Address>, Option<u64>, Option<u64>) {
+        let key = Symbol::new(&env, &invoice_id);
+        env.storage().persistent().get(&key).unwrap()
+    }
+
+    pub fn get_config(env: Env) -> (Address, Address, u64, u32) {
+        let key = Symbol::new(&env, "config");
+        env.storage().persistent().get(&key).unwrap()
+    }
+
+    pub fn get_invoice_count(env: Env) -> u64 {
+        let key = Symbol::new(&env, "config");
+        let config: (Address, Address, u64, u32) = env.storage().persistent().get(&key).unwrap();
+        config.2 - 1
+    }
+}
+            </textarea>
+            <button class="button" onclick="copyToClipboard('invoiceCode')">Copy Invoice Contract</button>
+        </div>
+
+        <div class="code-block">
+            <h3>Registry Contract (copy to Soroban Playground):</h3>
+            <textarea id="registryCode" style="width: 100%; height: 150px;" readonly>
+#![no_std]
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec, Map, String};
+
+#[contract]
+pub struct RegistryContract;
+
+#[contractimpl]
+impl RegistryContract {
+    pub fn initialize(env: Env, admin: Address) {
+        let key = Symbol::new(&env, "admin");
+        if env.storage().persistent().has(&key) {
+            panic!("already initialized");
+        }
+
+        env.storage().persistent().set(&key, &admin);
+    }
+
+    pub fn register_business(env: Env, business_address: Address, name: String) {
+        let admin_key = Symbol::new(&env, "admin");
+        let admin: Address = env.storage().persistent().get(&admin_key).unwrap();
+        
+        if env.current_contract_address() != admin {
+            panic!("only admin can register businesses");
+        }
+
+        let business_info = (
+            business_address.clone(),
+            name,
+            false, // is_verified
+            Option::<u64>::None, // verification_date
+            0u8, // kyc_level
+        );
+
+        env.storage().persistent().set(&business_address, &business_info);
+    }
+
+    pub fn verify_business(env: Env, business_address: Address, kyc_level: u8) {
+        let admin_key = Symbol::new(&env, "admin");
+        let admin: Address = env.storage().persistent().get(&admin_key).unwrap();
+        
+        if env.current_contract_address() != admin {
+            panic!("only admin can verify businesses");
+        }
+
+        if kyc_level > 2 {
+            panic!("invalid kyc level");
+        }
+
+        let key = business_address.clone();
+        let mut business_info: (Address, String, bool, Option<u64>, u8) = env.storage().persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("business not registered"));
+
+        business_info.2 = true; // is_verified
+        business_info.3 = Some(env.ledger().timestamp()); // verification_date
+        business_info.4 = kyc_level; // kyc_level
+
+        env.storage().persistent().set(&key, &business_info);
+    }
+
+    pub fn revoke_verification(env: Env, business_address: Address) {
+        let admin_key = Symbol::new(&env, "admin");
+        let admin: Address = env.storage().persistent().get(&admin_key).unwrap();
+        
+        if env.current_contract_address() != admin {
+            panic!("only admin can revoke verification");
+        }
+
+        let key = business_address.clone();
+        let mut business_info: (Address, String, bool, Option<u64>, u8) = env.storage().persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("business not registered"));
+
+        business_info.2 = false; // is_verified
+        business_info.3 = Option::<u64>::None; // verification_date
+        business_info.4 = 0u8; // kyc_level
+
+        env.storage().persistent().set(&key, &business_info);
+    }
+
+    pub fn is_verified(env: Env, business_address: Address) -> bool {
+        if let Some(business_info) = env.storage().persistent().get::<Address, (Address, String, bool, Option<u64>, u8)>(&business_address) {
+            business_info.2
+        } else {
+            false
+        }
+    }
+
+    pub fn get_business_info(env: Env, business_address: Address) -> (Address, String, bool, Option<u64>, u8) {
+        env.storage().persistent()
+            .get(&business_address)
+            .unwrap_or_else(|| panic!("business not found"))
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        let key = Symbol::new(&env, "admin");
+        env.storage().persistent().get(&key).unwrap()
+    }
+}
+            </textarea>
+            <button class="button" onclick="copyToClipboard('registryCode')">Copy Registry Contract</button>
+        </div>
+
+        <h2>📊 Deployment Status</h2>
+        <div id="status" class="status info">
+            Ready to deploy! Follow the instructions above.
+        </div>
+
+        <button class="button" onclick="window.open('https://soroban.stellar.org', '_blank')">Open Soroban Playground</button>
+        <button class="button" onclick="window.open('https://stellar.expert/testnet', '_blank')">Get Testnet Account</button>
+        <button class="button" onclick="window.open('https://friendbot.stellar.org', '_blank')">Get Test XLM</button>
+    </div>
+
+    <script>
+        function copyToClipboard(elementId) {
+            const element = document.getElementById(elementId);
+            element.select();
+            document.execCommand('copy');
+            
+            const status = document.getElementById('status');
+            status.className = 'status success';
+            status.textContent = 'Code copied to clipboard! Now paste it into Soroban Playground.';
+            
+            setTimeout(() => {
+                status.className = 'status info';
+                status.textContent = 'Ready to deploy! Follow the instructions above.';
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
